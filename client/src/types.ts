@@ -113,3 +113,53 @@ export interface MustPassHighlight {
   /** 正在核对的绕开路径（含两端点）与被绕开的卡片 */
   bypass: { skipId: string; path: string[] } | null;
 }
+
+/* ---------- 时间窗口分析（只读） ---------- */
+
+/** 单张卡片的可行赋时窗口 */
+export interface TimeWindowCard {
+  id: string;
+  /** 是否有固定发生时间（固定卡最早 = 最晚 = 该时刻） */
+  fixed: boolean;
+  /** 所有可行赋时中的最早时刻（本地分钟 ISO） */
+  earliest: string;
+  /** 所有可行赋时中的最晚时刻（本地分钟 ISO） */
+  latest: string;
+}
+
+/** 时间窗口无解原因 */
+export type TimeWindowConflict =
+  | {
+      kind: 'bounds';
+      /** 下界超过上界的卡片 */
+      cardId: string;
+      /** 导致上下界冲突的真实约束路径（节点 id 序列，相邻即真实连线） */
+      path: string[];
+      /** 冲突时间：该卡推导出的最早时刻（下界） */
+      earliest: string;
+      /** 冲突时间：该卡推导出的最晚时刻（上界） */
+      latest: string;
+    }
+  | {
+      kind: 'fixed-out-of-range';
+      /** 固定时刻越出事故区间的卡片 */
+      cardId: string;
+      /** 该卡的固定发生时间 */
+      occurredAt: string;
+    };
+
+/** 时间窗口分析结果（只读） */
+export interface TimeWindowResult {
+  start: string;
+  end: string;
+  minGapMinutes: number;
+  feasible: boolean;
+  /** 可行时每张卡片的赋时窗口；无解时为空 */
+  cards: TimeWindowCard[];
+  conflict: TimeWindowConflict | null;
+}
+
+/** 时间窗口分析在画布上的高亮视图 */
+export type TimeWindowHighlight =
+  | { kind: 'bounds'; path: string[] }
+  | { kind: 'fixed-out-of-range'; cardId: string };

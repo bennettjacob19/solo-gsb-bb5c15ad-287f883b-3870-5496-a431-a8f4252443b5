@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import type { Conflict } from '../App';
-import type { Evidence, GraphState, MustPassHighlight, OrderWitness, RedundantEdge } from '../types';
+import type { Evidence, GraphState, MustPassHighlight, OrderWitness, RedundantEdge, TimeWindowHighlight } from '../types';
 
 interface Rect {
   x: number;
@@ -23,6 +23,8 @@ interface BoardProps {
   preview: OrderWitness | null;
   /** 必经证据分析：高亮起终点与必经中间卡片，以及绕开核对路径 */
   mustPass: MustPassHighlight | null;
+  /** 时间窗口分析：高亮上下界冲突路径，或定位越出事故区间的固定卡 */
+  timeWindow: TimeWindowHighlight | null;
   onStartLink: (id: string) => void;
   onCancelLink: () => void;
   onConnect: (fromId: string, toId: string) => void;
@@ -155,6 +157,18 @@ export default function Board(props: BoardProps) {
   }, [bypassPath]);
   const mustSkipId = props.mustPass?.bypass?.skipId ?? null;
 
+  /* 时间窗口分析高亮：上下界冲突路径（红色）；越界固定卡定位（红色脉冲） */
+  const twPath = props.timeWindow?.kind === 'bounds' ? props.timeWindow.path : null;
+  const twPathNodes = useMemo(() => new Set(twPath ?? []), [twPath]);
+  const twEdgeKeys = useMemo(() => {
+    const s = new Set<string>();
+    if (twPath) {
+      for (let i = 0; i < twPath.length - 1; i++) s.add(`${twPath[i]}->${twPath[i + 1]}`);
+    }
+    return s;
+  }, [twPath]);
+  const twLocateId = props.timeWindow?.kind === 'fixed-out-of-range' ? props.timeWindow.cardId : null;
+
   /* 测量卡片位置，用于绘制 SVG 连线 */
   useLayoutEffect(() => {
     const board = boardRef.current;
@@ -276,6 +290,7 @@ export default function Board(props: BoardProps) {
           const isPruneAlt = pruneAltEdgeKeys.has(key);
           const isOrderPath = orderPathEdgeKeys.has(key);
           const isBypass = bypassEdgeKeys.has(key);
+          const isTwConflict = twEdgeKeys.has(key);
           const cls = [
             'edge',
             isConflict ? 'conflict' : '',
@@ -283,20 +298,23 @@ export default function Board(props: BoardProps) {
             isPruneAlt ? 'prune-alt' : '',
             isOrderPath ? 'order-path' : '',
             isBypass ? 'bypass' : '',
+            isTwConflict ? 'tw-conflict' : '',
           ]
             .filter(Boolean)
             .join(' ');
           const marker = isConflict
             ? 'arrow-red'
-            : isPruneTarget
-              ? 'arrow-amber'
-              : isPruneAlt
-                ? 'arrow-green'
-                : isOrderPath
-                  ? 'arrow-cyan'
-                  : isBypass
-                    ? 'arrow-orange'
-                    : 'arrow';
+            : isTwConflict
+              ? 'arrow-red'
+              : isPruneTarget
+                ? 'arrow-amber'
+                : isPruneAlt
+                  ? 'arrow-green'
+                  : isOrderPath
+                    ? 'arrow-cyan'
+                    : isBypass
+                      ? 'arrow-orange'
+                      : 'arrow';
           const d = curve(s, t);
           return (
             <g key={e.id} className={cls} onClick={() => props.onDeleteEdge(e.id)}>
@@ -355,6 +373,8 @@ export default function Board(props: BoardProps) {
               const isMustPass = mustPassNodes.has(ev.id);
               const isBypassNode = bypassNodes.has(ev.id);
               const isMustSkip = mustSkipId === ev.id;
+              const isTwPath = twPathNodes.has(ev.id);
+              const isTwLocate = twLocateId === ev.id;
               return (
                 <article
                   key={ev.id}
@@ -373,6 +393,8 @@ export default function Board(props: BoardProps) {
                     isMustPass ? 'must-pass' : '',
                     isBypassNode ? 'bypass-node' : '',
                     isMustSkip ? 'must-skip' : '',
+                    isTwPath ? 'tw-path' : '',
+                    isTwLocate ? 'tw-locate' : '',
                   ]
                     .filter(Boolean)
                     .join(' ')}

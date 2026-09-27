@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { db, getEdges, getEvidence } from './db';
-import { analyzeMustPass, cycleAfterAdding, findBypassPath, findCycle, findRedundantEdges, mergeConflict, planMergeEdges, planPrune, queryOrder, topoLevels } from './graph';
+import { analyzeMustPass, analyzeTimeWindow, cycleAfterAdding, findBypassPath, findCycle, findRedundantEdges, mergeConflict, planMergeEdges, planPrune, queryOrder, topoLevels } from './graph';
 import { resetWithSample, seedIfEmpty } from './seed';
-import type { BypassPathResult, Evidence, GraphState, MustPassResult, OrderQueryResult, OrderWitness, PruneResult, RedundancyReport } from './types';
+import type { BypassPathResult, Evidence, GraphState, MustPassResult, OrderQueryResult, OrderWitness, PruneResult, RedundancyReport, TimeWindowResult } from './types';
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -298,6 +298,78 @@ app.get('/api/must-pass/bypass', (req, res) => {
     return res.status(404).json({ message: '证据卡片不存在，请刷新后重试' });
   }
   const result: BypassPathResult = { aId: a, bId: b, skipId: skip, path: findBypassPath(getEdges(), a, b, skip) };
+  res.json(result);
+});
+
+/* ---------- 时间窗口分析（只读） ---------- */
+
+/** 把 epoch ms 格式化为本地分钟 ISO（与 datetime-local 输入及卡片 occurredAt 表示一致） */
+function fmtLocalMinute(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+app.get('/api/time-window', (req, res) => {
+  const { start, end, minGapMinutes } = req.query;
+  if (typeof start !== 'string' || typeof end !== 'string' || !start.trim() || !end.trim()) {
+    return res.status(400).json({ message: '事故起止时间均为必填' });
+  }
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) {
+    return res.status(400).json({ message: '事故起止时间格式无效' });
+  }
+  if (startMs > endMs) {
+    return res.status(400).json({ message: '事故开始时间不能晚于结束时间（区间倒置）' });
+  }
+  const gapRaw = typeof minGapMinutes === 'string' ? minGapMinutes.trim() : '';
+  if (!/^\d+$/.test(gapRaw)) {
+    return res.status(400).json({ message: '最小间隔必须为不小于 1 的整数（分钟）' });
+  }
+  const gap = Number(gapRaw);
+  if (!Number.isSafeInteger(gap) || gap < 1) {
+    return res.status(400).json({ message: '最小间隔必须为不小于 1 的整数（分钟）' });
+  }
+
+  const evidence = getEvidence();
+  const analysis = analyzeTimeWindow(
+    evidence.map((e) => ({ id: e.id, occurredAt: e.occurredAt })),
+    getEdges(),
+    { startMs, endMs, gapMs: gap * 60000 },
+  );
+  if (!analysis) {
+    return res.status(409).json({ message: '当前约束图存在环，无法分析时间窗口' });
+  }
+  const occurredAtOf = (id: string) => evidence.find((e) => e.id === id)?.occurredAt ?? null;
+  const result: TimeWindowResult = {
+    start: fmtLocalMinute(startMs),
+    end: fmtLocalMinute(endMs),
+    minGapMinutes: gap,
+    feasible: analysis.feasible,
+    cards: analysis.windows.map((w) => ({
+      id: w.id,
+      fixed: w.fixed,
+      earliest: fmtLocalMinute(w.earliestMs),
+      latest: fmtLocalMinute(w.latestMs),
+    })),
+    conflict:
+      analysis.conflict === null
+        ? null
+        : analysis.conflict.kind === 'bounds'
+          ? {
+              kind: 'bounds',
+              cardId: analysis.conflict.cardId,
+              path: analysis.conflict.path,
+              earliest: fmtLocalMinute(analysis.conflict.earliestMs),
+              latest: fmtLocalMinute(analysis.conflict.latestMs),
+            }
+          : {
+              kind: 'fixed-out-of-range',
+              cardId: analysis.conflict.cardId,
+              occurredAt: occurredAtOf(analysis.conflict.cardId) ?? fmtLocalMinute(analysis.conflict.occurredAtMs),
+            },
+  };
   res.json(result);
 });
 

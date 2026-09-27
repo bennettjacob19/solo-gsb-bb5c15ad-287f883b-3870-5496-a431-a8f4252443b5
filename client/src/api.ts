@@ -1,4 +1,4 @@
-import type { BypassPathResult, EvidenceFormValues, GraphState, MergeConflictKind, MustPassResult, OrderQueryResult, PruneResult, RedundantEdge } from './types';
+import type { BypassPathResult, EvidenceFormValues, GraphState, MergeConflictKind, MustPassResult, OrderQueryResult, PruneResult, RedundantEdge, TimeWindowResult } from './types';
 
 export class ApiError extends Error {
   status: number;
@@ -43,6 +43,10 @@ export const api = {
   mustPassBypass: (a: string, b: string, skip: string) =>
     request<BypassPathResult>(
       `/api/must-pass/bypass?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&skip=${encodeURIComponent(skip)}`,
+    ),
+  timeWindow: (start: string, end: string, minGapMinutes: number) =>
+    request<TimeWindowResult>(
+      `/api/time-window?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&minGapMinutes=${encodeURIComponent(minGapMinutes)}`,
     ),
   importSnapshot: (payload: unknown) => request<GraphState>('/api/import', json('POST', payload)),
   seed: () => request<GraphState>('/api/seed', { method: 'POST' }),

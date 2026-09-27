@@ -378,6 +378,173 @@ export function findBypassPath(edges: EdgeLike[], aId: string, bId: string, skip
   return findPath(rest, aId, bId);
 }
 
+/* ---------- 时间窗口分析（只读） ---------- */
+
+export interface TimeWindowNode {
+  id: string;
+  /** 已有发生时间（固定时刻）；null 表示空时间卡 */
+  occurredAt: string | null;
+}
+
+export interface TimeWindowParams {
+  /** 事故起点（闭区间下界，epoch ms） */
+  startMs: number;
+  /** 事故终点（闭区间上界，epoch ms） */
+  endMs: number;
+  /** 最小间隔（epoch ms，≥ 1 分钟）：每条「必须早于」连线要求后卡至少晚于前卡该间隔 */
+  gapMs: number;
+}
+
+/** 上下界冲突：导致冲突的真实约束路径与冲突时间（epoch ms） */
+export interface TimeWindowBoundsConflict {
+  kind: 'bounds';
+  /** 下界超过上界的卡片 */
+  cardId: string;
+  /** 导致冲突的真实约束路径（节点 id 序列，相邻即真实连线；端点为固定卡或受事故区间端点约束的卡） */
+  path: string[];
+  /** 冲突时间：该卡沿路径推导出的最早时刻（下界） */
+  earliestMs: number;
+  /** 冲突时间：该卡沿路径推导出的最晚时刻（上界） */
+  latestMs: number;
+}
+
+/** 固定时刻越出事故区间：定位该卡片 */
+export interface TimeWindowFixedOutOfRange {
+  kind: 'fixed-out-of-range';
+  cardId: string;
+  occurredAtMs: number;
+}
+
+export interface TimeWindowAnalysis {
+  feasible: boolean;
+  /** 可行时：每张卡片所有可行赋时中的最早 / 最晚时刻（epoch ms）；无解时为空 */
+  windows: Array<{ id: string; fixed: boolean; earliestMs: number; latestMs: number }>;
+  conflict: TimeWindowBoundsConflict | TimeWindowFixedOutOfRange | null;
+}
+
+/**
+ * 时间窗口分析：在事故闭区间 [startMs, endMs] 内为每张卡片求所有可行赋时的最早、最晚时刻。
+ *
+ * 约束模型：
+ * - 每张卡片（含空时间卡、孤立卡）的赋时必须落在 [startMs, endMs] 闭区间内；
+ * - 已有发生时间的卡片为固定时刻（最早 = 最晚 = 该时刻）；
+ * - 每条「必须早于」连线 from → to 要求 time(to) ≥ time(from) + gapMs。
+ *
+ * 算法（图为有向无环图，一次正向 + 一次反向传播即收敛）：
+ * - 下界 L：L 初始为 startMs（固定卡为其时刻），按拓扑序沿边方向取 max(L(to), L(from) + gap)；
+ * - 上界 U：U 初始为 endMs（固定卡为其时刻），按逆拓扑序沿边反方向取 min(U(from), U(to) - gap)；
+ * - 有解 ⇔ 每张卡片 L ≤ U（此时取 time = L 即为一组可行赋时，故 L/U 即最早/最晚时刻）。
+ *
+ * 无解时回溯边界来源链，拼出一条导致冲突的真实约束路径：
+ * 从冲突卡沿「推高其下界的前驱链」回溯到界源（事故起点或固定卡），
+ * 再沿「压低其上界的后继链」前进到界源（事故终点或固定卡），
+ * 两段均为真实连线，拼接后相邻节点皆为真实「必须早于」连线。
+ * 固定时刻越出事故区间时直接定位该卡片。图有环时返回 null。
+ */
+export function analyzeTimeWindow(
+  nodes: TimeWindowNode[],
+  edges: EdgeLike[],
+  params: TimeWindowParams,
+): TimeWindowAnalysis | null {
+  const { startMs, endMs, gapMs } = params;
+  const ids = nodes.map((n) => n.id);
+
+  // 固定时刻：解析已有发生时间；越出事故区间 → 定位该卡片（按卡片顺序取第一张）
+  const fixedMs = new Map<string, number>();
+  for (const n of nodes) {
+    if (n.occurredAt === null) continue;
+    const t = Date.parse(n.occurredAt);
+    if (Number.isNaN(t)) continue;
+    if (t < startMs || t > endMs) {
+      return { feasible: false, windows: [], conflict: { kind: 'fixed-out-of-range', cardId: n.id, occurredAtMs: t } };
+    }
+    fixedMs.set(n.id, t);
+  }
+
+  const levels = topoLevels(ids, edges);
+  if (!levels) return null;
+  // 按层级升序即一个合法拓扑序（每条边都从低层指向高层）
+  const order = [...ids].sort((a, b) => levels[a] - levels[b]);
+
+  const out = new Map<string, EdgeLike[]>();
+  const inc = new Map<string, EdgeLike[]>();
+  for (const id of ids) {
+    out.set(id, []);
+    inc.set(id, []);
+  }
+  for (const e of edges) {
+    if (!out.has(e.fromId) || !out.has(e.toId)) continue;
+    out.get(e.fromId)!.push(e);
+    inc.get(e.toId)!.push(e);
+  }
+
+  const L = new Map<string, number>();
+  const U = new Map<string, number>();
+  for (const id of ids) {
+    const f = fixedMs.get(id);
+    L.set(id, f ?? startMs);
+    U.set(id, f ?? endMs);
+  }
+  // 推高下界的前驱卡片 / 压低上界的后继卡片（用于回溯冲突路径）
+  const lowerFrom = new Map<string, string>();
+  const upperFrom = new Map<string, string>();
+
+  // 正向传播下界：后卡至少晚于前卡一个最小间隔
+  for (const from of order) {
+    const base = L.get(from)!;
+    for (const e of out.get(from)!) {
+      const cand = base + gapMs;
+      if (cand > L.get(e.toId)!) {
+        L.set(e.toId, cand);
+        lowerFrom.set(e.toId, from);
+      }
+    }
+  }
+  // 反向传播上界：前卡至少早于后卡一个最小间隔
+  for (let i = order.length - 1; i >= 0; i--) {
+    const to = order[i];
+    const base = U.get(to)!;
+    for (const e of inc.get(to)!) {
+      const cand = base - gapMs;
+      if (cand < U.get(e.fromId)!) {
+        U.set(e.fromId, cand);
+        upperFrom.set(e.fromId, to);
+      }
+    }
+  }
+
+  // 有解 ⇔ 全部卡片 L ≤ U；否则在第一个（拓扑序最早）冲突卡处拼出真实约束路径
+  for (const id of order) {
+    const lo = L.get(id)!;
+    const hi = U.get(id)!;
+    if (lo > hi) {
+      const lowerChain: string[] = [id];
+      let cur = id;
+      while (lowerFrom.has(cur)) {
+        cur = lowerFrom.get(cur)!;
+        lowerChain.unshift(cur);
+      }
+      const upperChain: string[] = [];
+      cur = id;
+      while (upperFrom.has(cur)) {
+        cur = upperFrom.get(cur)!;
+        upperChain.push(cur);
+      }
+      return {
+        feasible: false,
+        windows: [],
+        conflict: { kind: 'bounds', cardId: id, path: [...lowerChain, ...upperChain], earliestMs: lo, latestMs: hi },
+      };
+    }
+  }
+
+  return {
+    feasible: true,
+    windows: ids.map((id) => ({ id, fixed: fixedMs.has(id), earliestMs: L.get(id)!, latestMs: U.get(id)! })),
+    conflict: null,
+  };
+}
+
 /**
  * 在已有图中寻找一个环（用于导入快照校验）。
  * 返回闭环节点序列 [n, …, n]；无环返回 null。

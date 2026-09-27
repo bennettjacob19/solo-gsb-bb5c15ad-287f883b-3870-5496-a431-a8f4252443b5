@@ -940,6 +940,151 @@ body {
   line-height: 1.7;
 }
 
+/* ---------- 时间窗口分析面板 ---------- */
+
+.timewin-panel {
+  background: var(--bg-soft);
+  border: 1px solid rgba(250, 204, 21, 0.4);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 14px;
+}
+
+.timewin-head h2 {
+  margin: 0 0 4px;
+  font-size: 15.5px;
+  color: #facc15;
+}
+
+.timewin-head p {
+  margin: 0 0 10px;
+  max-width: 960px;
+  line-height: 1.6;
+}
+
+.timewin-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.timewin-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.timewin-field input {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13.5px;
+  font-family: inherit;
+  color-scheme: dark;
+}
+
+.timewin-field input:focus {
+  outline: none;
+  border-color: #facc15;
+}
+
+.timewin-gap input {
+  width: 110px;
+}
+
+.timewin-result {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timewin-verdict {
+  font-size: 14.5px;
+  line-height: 1.7;
+}
+
+.timewin-verdict b {
+  color: #facc15;
+}
+
+.timewin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.timewin-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.timewin-title {
+  font-weight: 600;
+}
+
+.timewin-chip {
+  font-size: 11.5px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.timewin-chip.fixed {
+  color: #facc15;
+  border-color: rgba(250, 204, 21, 0.5);
+  background: rgba(250, 204, 21, 0.08);
+}
+
+.timewin-range {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.timewin-range b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.timewin-conflict-path {
+  font-size: 13px;
+  color: #ffb3bb;
+  line-height: 1.7;
+}
+
+/* 时间窗口分析画布高亮：上下界冲突路径（红色）与越界固定卡定位（红色脉冲） */
+.edge.tw-conflict .edge-line {
+  stroke: var(--danger);
+  stroke-width: 3;
+  opacity: 1;
+}
+
+.card.tw-path {
+  border-color: rgba(255, 92, 108, 0.8);
+  box-shadow: 0 0 0 3px rgba(255, 92, 108, 0.18);
+}
+
+.card.tw-locate {
+  border-color: var(--danger);
+  animation: card-shake-glow 1.4s ease-in-out infinite;
+}
+
 /* ---------- 弹窗 ---------- */
 
 .modal-backdrop {

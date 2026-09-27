@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   analyzeMustPass,
+  analyzeTimeWindow,
   cycleAfterAdding,
   findBypassPath,
   findCycle,
@@ -542,4 +543,146 @@ test('事务模拟：任意可合并场景执行计划后无重复连线、无�
     keys.sort(),
     ['a->t', 'b->t', 't->c', 't->d', 'x->y'],
   );
+});
+
+/* ---------- 时间窗口分析 ---------- */
+
+const T = (s: string) => Date.parse(s);
+const MIN = 60000;
+const twNode = (id: string, occurredAt: string | null = null) => ({ id, occurredAt });
+
+test('analyzeTimeWindow：固定卡最早=最晚，空时间卡沿链推出窗口', () => {
+  const nodes = [twNode('a', '2026-03-12T02:15'), twNode('b'), twNode('c')];
+  const edges = [
+    { fromId: 'a', toId: 'b' },
+    { fromId: 'b', toId: 'c' },
+  ];
+  const r = analyzeTimeWindow(nodes, edges, { startMs: T('2026-03-12T02:00'), endMs: T('2026-03-12T03:00'), gapMs: 10 * MIN })!;
+  assert.equal(r.feasible, true);
+  assert.equal(r.conflict, null);
+  const w = new Map(r.windows.map((x) => [x.id, x]));
+  // 固定卡：最早 = 最晚 = 固定时刻
+  assert.deepEqual({ e: w.get('a')!.earliestMs, l: w.get('a')!.latestMs, f: w.get('a')!.fixed }, {
+    e: T('2026-03-12T02:15'),
+    l: T('2026-03-12T02:15'),
+    f: true,
+  });
+  // b 下界 = a + 10min；上界 = c 的上界 - 10min
+  assert.deepEqual({ e: w.get('b')!.earliestMs, l: w.get('b')!.latestMs, f: w.get('b')!.fixed }, {
+    e: T('2026-03-12T02:25'),
+    l: T('2026-03-12T02:50'),
+    f: false,
+  });
+  assert.deepEqual({ e: w.get('c')!.earliestMs, l: w.get('c')!.latestMs }, {
+    e: T('2026-03-12T02:35'),
+    l: T('2026-03-12T03:00'),
+  });
+});
+
+test('analyzeTimeWindow：孤立卡也受事故区间限制，空时间卡介于两固定卡之间参与推导', () => {
+  const nodes = [twNode('iso'), twNode('a', '2026-03-12T02:00'), twNode('m'), twNode('z', '2026-03-12T02:30')];
+  const edges = [
+    { fromId: 'a', toId: 'm' },
+    { fromId: 'm', toId: 'z' },
+  ];
+  const r = analyzeTimeWindow(nodes, edges, { startMs: T('2026-03-12T01:00'), endMs: T('2026-03-12T03:00'), gapMs: 10 * MIN })!;
+  assert.equal(r.feasible, true);
+  const w = new Map(r.windows.map((x) => [x.id, x]));
+  // 孤立卡：整个事故闭区间
+  assert.deepEqual({ e: w.get('iso')!.earliestMs, l: w.get('iso')!.latestMs }, { e: T('2026-03-12T01:00'), l: T('2026-03-12T03:00') });
+  // 空时间卡 m：下界 = a + 10min，上界 = z - 10min
+  assert.deepEqual({ e: w.get('m')!.earliestMs, l: w.get('m')!.latestMs }, { e: T('2026-03-12T02:10'), l: T('2026-03-12T02:20') });
+});
+
+test('analyzeTimeWindow：两张固定卡间距小于最小间隔时无解，给出真实约束路径与冲突时间', () => {
+  const nodes = [twNode('a', '2026-03-12T02:00'), twNode('b', '2026-03-12T02:05')];
+  const edges = [{ fromId: 'a', toId: 'b' }];
+  const r = analyzeTimeWindow(nodes, edges, { startMs: T('2026-03-12T01:00'), endMs: T('2026-03-12T03:00'), gapMs: 10 * MIN })!;
+  assert.equal(r.feasible, false);
+  assert.deepEqual(r.windows, []);
+  const c = r.conflict!;
+  assert.equal(c.kind, 'bounds');
+  if (c.kind !== 'bounds') return;
+  // 反向传播把 a 的上界压到 b − 10min = 01:55，与其固定下界 02:00 冲突（拓扑序首张冲突卡）
+  assert.equal(c.cardId, 'a');
+  assert.equal(c.earliestMs, T('2026-03-12T02:00'));
+  assert.equal(c.latestMs, T('2026-03-12T01:55'));
+  assert.ok(c.earliestMs > c.latestMs);
+  // 冲突路径相邻节点均为真实连线
+  assert.deepEqual(c.path, ['a', 'b']);
+});
+
+test('analyzeTimeWindow：链式推导超出事故终点时，冲突路径贯穿整条真实连线链', () => {
+  const nodes = [twNode('a', '2026-03-12T02:50'), twNode('b'), twNode('c'), twNode('d')];
+  const edges = [
+    { fromId: 'a', toId: 'b' },
+    { fromId: 'b', toId: 'c' },
+    { fromId: 'c', toId: 'd' },
+  ];
+  const r = analyzeTimeWindow(nodes, edges, { startMs: T('2026-03-12T02:00'), endMs: T('2026-03-12T03:00'), gapMs: 10 * MIN })!;
+  assert.equal(r.feasible, false);
+  const c = r.conflict!;
+  assert.equal(c.kind, 'bounds');
+  if (c.kind !== 'bounds') return;
+  // a 固定 02:50，但为满足 a→b→c→d 各 10 分钟间隔且 d ≤ 03:00，a 必须 ≤ 02:30
+  assert.equal(c.cardId, 'a');
+  assert.equal(c.earliestMs, T('2026-03-12T02:50'));
+  assert.equal(c.latestMs, T('2026-03-12T02:30'));
+  assert.deepEqual(c.path, ['a', 'b', 'c', 'd']);
+  // 路径相邻对都是真实连线
+  for (let i = 0; i < c.path.length - 1; i++) {
+    assert.ok(edges.some((e) => e.fromId === c.path[i] && e.toId === c.path[i + 1]), `${c.path[i]}→${c.path[i + 1]} 应为真实连线`);
+  }
+});
+
+test('analyzeTimeWindow：退化闭区间（起点=终点）下孤立卡可行、带连线则无解', () => {
+  const ok = analyzeTimeWindow([twNode('x')], [], { startMs: T('2026-03-12T02:00'), endMs: T('2026-03-12T02:00'), gapMs: MIN })!;
+  assert.equal(ok.feasible, true);
+  assert.deepEqual({ e: ok.windows[0].earliestMs, l: ok.windows[0].latestMs }, { e: T('2026-03-12T02:00'), l: T('2026-03-12T02:00') });
+
+  const bad = analyzeTimeWindow([twNode('a'), twNode('b')], [{ fromId: 'a', toId: 'b' }], {
+    startMs: T('2026-03-12T02:00'),
+    endMs: T('2026-03-12T02:00'),
+    gapMs: MIN,
+  })!;
+  assert.equal(bad.feasible, false);
+  const c = bad.conflict!;
+  assert.equal(c.kind, 'bounds');
+  if (c.kind !== 'bounds') return;
+  // a 的上界被反向传播压到 02:00 − 1min = 01:59，低于区间起点 02:00
+  assert.deepEqual(c.path, ['a', 'b']);
+  assert.equal(c.cardId, 'a');
+  assert.equal(c.earliestMs, T('2026-03-12T02:00'));
+  assert.equal(c.latestMs, T('2026-03-12T02:00') - MIN);
+});
+
+test('analyzeTimeWindow：固定时刻越出事故区间时定位该卡片', () => {
+  const nodes = [twNode('in', '2026-03-12T02:30'), twNode('out', '2026-03-12T04:00')];
+  const r = analyzeTimeWindow(nodes, [], { startMs: T('2026-03-12T02:00'), endMs: T('2026-03-12T03:00'), gapMs: MIN })!;
+  assert.equal(r.feasible, false);
+  assert.deepEqual(r.windows, []);
+  assert.deepEqual(r.conflict, { kind: 'fixed-out-of-range', cardId: 'out', occurredAtMs: T('2026-03-12T04:00') });
+
+  // 早于事故起点同样越界
+  const early = analyzeTimeWindow([twNode('out', '2026-03-12T01:00')], [], {
+    startMs: T('2026-03-12T02:00'),
+    endMs: T('2026-03-12T03:00'),
+    gapMs: MIN,
+  })!;
+  assert.equal(early.conflict?.kind, 'fixed-out-of-range');
+});
+
+test('analyzeTimeWindow：固定时刻恰好落在区间端点上可行（闭区间）', () => {
+  const nodes = [twNode('a', '2026-03-12T02:00'), twNode('b', '2026-03-12T03:00')];
+  const r = analyzeTimeWindow(nodes, [], { startMs: T('2026-03-12T02:00'), endMs: T('2026-03-12T03:00'), gapMs: MIN })!;
+  assert.equal(r.feasible, true);
+});
+
+test('analyzeTimeWindow：有环图返回 null', () => {
+  const nodes = [twNode('a'), twNode('b')];
+  const cyclic = [
+    { fromId: 'a', toId: 'b' },
+    { fromId: 'b', toId: 'a' },
+  ];
+  assert.equal(analyzeTimeWindow(nodes, cyclic, { startMs: T('2026-03-12T02:00'), endMs: T('2026-03-12T03:00'), gapMs: MIN }), null);
 });

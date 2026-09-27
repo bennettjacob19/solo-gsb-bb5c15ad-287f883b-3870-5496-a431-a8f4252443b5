@@ -100,3 +100,52 @@ export interface BypassPathResult {
   /** 绕开 skipId 的一条最短 A→B 真实路径（含两端点）；不存在（该卡片实为必经）时为 null */
   path: string[] | null;
 }
+
+/* ---------- 时间窗口分析（只读） ---------- */
+
+/** 单张卡片的可行赋时窗口（时刻为本地分钟 ISO，如 2026-03-12T02:15） */
+export interface TimeWindowCard {
+  id: string;
+  /** 是否有固定发生时间（固定卡最早 = 最晚 = 该时刻） */
+  fixed: boolean;
+  /** 所有可行赋时中的最早时刻 */
+  earliest: string;
+  /** 所有可行赋时中的最晚时刻 */
+  latest: string;
+}
+
+/** 时间窗口无解原因 */
+export type TimeWindowConflict =
+  | {
+      kind: 'bounds';
+      /** 下界超过上界的卡片 */
+      cardId: string;
+      /** 导致上下界冲突的真实约束路径（节点 id 序列，相邻即真实连线） */
+      path: string[];
+      /** 冲突时间：该卡推导出的最早时刻（下界） */
+      earliest: string;
+      /** 冲突时间：该卡推导出的最晚时刻（上界） */
+      latest: string;
+    }
+  | {
+      kind: 'fixed-out-of-range';
+      /** 固定时刻越出事故区间的卡片 */
+      cardId: string;
+      /** 该卡的固定发生时间 */
+      occurredAt: string;
+    };
+
+/** 时间窗口分析结果（只读，不改写卡片或连线） */
+export interface TimeWindowResult {
+  /** 事故区间起点（闭区间，本地分钟 ISO） */
+  start: string;
+  /** 事故区间终点（闭区间，本地分钟 ISO） */
+  end: string;
+  /** 最小间隔（分钟，≥1 的整数） */
+  minGapMinutes: number;
+  feasible: boolean;
+  /** 可行时每张卡片的赋时窗口；无解时为空（不展示可行窗口） */
+  cards: TimeWindowCard[];
+  /** 无解原因：上下界冲突路径及冲突时间，或固定时刻越界定位 */
+  conflict: TimeWindowConflict | null;
+}
