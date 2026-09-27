@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { db, getEdges, getEvidence } from './db';
-import { analyzeMustPass, cycleAfterAdding, findBypassPath, findCycle, findRedundantEdges, mergeConflict, planMergeEdges, planPrune, queryOrder, topoLevels } from './graph';
+import { analyzeMustPass, analyzeTimeWindow, cycleAfterAdding, findBypassPath, findCycle, findRedundantEdges, mergeConflict, planMergeEdges, planPrune, queryOrder, topoLevels } from './graph';
 import { resetWithSample, seedIfEmpty } from './seed';
-import type { BypassPathResult, Evidence, GraphState, MustPassResult, OrderQueryResult, OrderWitness, PruneResult, RedundancyReport } from './types';
+import type { BypassPathResult, Evidence, GraphState, MustPassResult, OrderQueryResult, OrderWitness, PruneResult, RedundancyReport, TimeWindowResult } from './types';
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -52,6 +52,52 @@ function parseEvidenceInput(body: unknown): { ok: true; value: EvidenceInput } |
       occurredAt,
     },
   };
+}
+
+/* ---------- 时间窗口分析的时间口径 ---------- */
+
+const MINUTE = 60_000;
+const MAX_GAP_MINUTES = 1_000_000;
+
+/**
+ * 解析时间为「墙钟毫秒数」：
+ * - 无时区时间（如 2026-03-12T02:15，datetime-local）按其字面值直接取墙钟时间；
+ * - 带 Z 或偏移量的时间先换算到同一墙钟坐标（toISOString 后去掉时区部分）。
+ * 这样同一面板内事故区间、固定时刻、传播计算全部在统一的墙钟轴上完成，
+ * 不受服务器所在时区影响。非法时间返回 null。
+ */
+export function parseWallTimeMs(raw: string): number | null {
+  const s = raw.trim();
+  let naive = s;
+  const hasZone = /[zZ]$/.test(s) || /[+-]\d{2}:?\d{2}$/.test(s);
+  if (hasZone) {
+    const t = Date.parse(s);
+    if (Number.isNaN(t)) return null;
+    naive = new Date(t).toISOString().slice(0, -1); // 去掉结尾 Z
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(naive);
+  if (!m) {
+    // 兼容其他可被 JS 识别的无时区输入：Date 构造按本地时区解析，按分钟取整
+    const fallback = Date.parse(s);
+    return Number.isNaN(fallback) ? null : Math.floor(fallback / MINUTE) * MINUTE;
+  }
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = Number(m[4]);
+  const minute = Number(m[5]);
+  const second = m[6] === undefined ? 0 : Number(m[6]);
+  const ms = m[7] === undefined ? 0 : Number(m[7].padEnd(3, '0'));
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null;
+  const dt = new Date(Date.UTC(year, month - 1, day, hour, minute, second, ms));
+  if (dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day || dt.getUTCFullYear() !== year) return null;
+  return dt.getTime();
+}
+
+/** 墙钟毫秒数 → 分钟精度字符串（YYYY-MM-DDTHH:mm），用于结果回传，不做时区换算 */
+function formatWallMinute(t: number): string {
+  const iso = new Date(Math.floor(t / MINUTE) * MINUTE).toISOString();
+  return iso.slice(0, 16);
 }
 
 /* ---------- 证据卡片 ---------- */
@@ -298,6 +344,95 @@ app.get('/api/must-pass/bypass', (req, res) => {
     return res.status(404).json({ message: '证据卡片不存在，请刷新后重试' });
   }
   const result: BypassPathResult = { aId: a, bId: b, skipId: skip, path: findBypassPath(getEdges(), a, b, skip) };
+  res.json(result);
+});
+
+/* ---------- 时间窗口分析（只读） ---------- */
+
+app.get('/api/time-window', (req, res) => {
+  const { start, end, gap } = req.query as Record<string, unknown>;
+  if (typeof start !== 'string' || typeof end !== 'string') {
+    return res.status(400).json({ message: '事故起止时间均为必填（start 与 end）' });
+  }
+  const windowStartMs = parseWallTimeMs(start);
+  const windowEndMs = parseWallTimeMs(end);
+  if (windowStartMs === null || windowEndMs === null) {
+    return res.status(400).json({ message: '事故起止时间格式无效，请使用合法日期时间（如 2026-03-12T02:00）' });
+  }
+  if (typeof gap !== 'string' || !/^\d+$/.test(gap)) {
+    return res.status(400).json({ message: '最小间隔必须为整数分钟（至少 1 分钟）' });
+  }
+  const gapMinutes = Number(gap);
+  if (!Number.isSafeInteger(gapMinutes) || gapMinutes < 1) {
+    return res.status(400).json({ message: '最小间隔必须为至少 1 分钟的整数' });
+  }
+  if (gapMinutes > MAX_GAP_MINUTES) {
+    return res.status(400).json({ message: `最小间隔过大，请输入不超过 ${MAX_GAP_MINUTES} 分钟的整数` });
+  }
+  if (windowStartMs > windowEndMs) {
+    return res.status(400).json({ message: '事故区间倒置：开始时间不能晚于结束时间' });
+  }
+
+  const evidence = getEvidence();
+  // 固定时刻用同一墙钟轴解析；历史数据均为合法时间，万一存在脏数据按无效输入拒绝
+  const fixedAt = new Map<string, number | null>();
+  for (const e of evidence) {
+    if (e.occurredAt) {
+      const t = parseWallTimeMs(e.occurredAt);
+      if (t === null) return res.status(400).json({ message: `卡片「${e.title}」的已有发生时间格式无效，无法参与分析` });
+      fixedAt.set(e.id, t);
+    } else {
+      fixedAt.set(e.id, null);
+    }
+  }
+
+  const analysis = analyzeTimeWindow(
+    evidence.map((e) => ({ id: e.id, createdAt: e.createdAt })),
+    getEdges(),
+    fixedAt,
+    windowStartMs,
+    windowEndMs,
+    gapMinutes * MINUTE,
+  );
+  if (!analysis) {
+    return res.status(409).json({ message: '当前约束图存在环，无法分析时间窗口' });
+  }
+
+  const result: TimeWindowResult = {
+    feasible: analysis.feasible,
+    windowStart: formatWallMinute(windowStartMs),
+    windowEnd: formatWallMinute(windowEndMs),
+    gapMinutes,
+    cards: analysis.cards.map((c) => ({
+      cardId: c.cardId,
+      fixed: c.fixed,
+      earliestMs: c.earliestMs,
+      latestMs: c.latestMs,
+      earliest: formatWallMinute(c.earliestMs),
+      latest: formatWallMinute(c.latestMs),
+    })),
+    outOfRange: analysis.outOfRange.map((o) => ({
+      cardId: o.cardId,
+      fixedAtMs: o.fixedAtMs,
+      fixedAt: formatWallMinute(o.fixedAtMs),
+      side: o.side,
+    })),
+    conflict: analysis.conflict
+      ? {
+          kind: 'bound-conflict',
+          pivotId: analysis.conflict.pivotId,
+          lowerAtMs: analysis.conflict.lowerAtMs,
+          upperAtMs: analysis.conflict.upperAtMs,
+          lowerAt: formatWallMinute(analysis.conflict.lowerAtMs),
+          upperAt: formatWallMinute(analysis.conflict.upperAtMs),
+          path: analysis.conflict.path,
+          lowerAnchor: analysis.conflict.lowerAnchor,
+          upperAnchor: analysis.conflict.upperAnchor,
+          lowerAnchorCardId: analysis.conflict.lowerAnchorCardId,
+          upperAnchorCardId: analysis.conflict.upperAnchorCardId,
+        }
+      : null,
+  };
   res.json(result);
 });
 

@@ -6,8 +6,9 @@ import ConflictBanner from './components/ConflictBanner';
 import MustPassPanel from './components/MustPassPanel';
 import OrderQueryPanel from './components/OrderQueryPanel';
 import PrunePanel from './components/PrunePanel';
+import TimeWindowPanel from './components/TimeWindowPanel';
 import TimelinePanel from './components/TimelinePanel';
-import type { Evidence, EvidenceFormValues, GraphState, MergeConflict, MustPassHighlight, OrderWitness, RedundantEdge } from './types';
+import type { Evidence, EvidenceFormValues, GraphState, MergeConflict, MustPassHighlight, OrderWitness, RedundantEdge, TimeWindowHighlight } from './types';
 
 export interface Conflict {
   cycle: string[];
@@ -32,6 +33,8 @@ export default function App() {
   const [orderPreview, setOrderPreview] = useState<OrderWitness | null>(null);
   /** 必经证据分析：画布上的高亮视图（由 MustPassPanel 全权维护） */
   const [mustPassHL, setMustPassHL] = useState<MustPassHighlight | null>(null);
+  /** 时间窗口分析：画布上的冲突路径 / 越界定位（由 TimeWindowPanel 全权维护） */
+  const [timeWindowHL, setTimeWindowHL] = useState<TimeWindowHighlight | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -316,6 +319,8 @@ export default function App() {
 
       {state && <MustPassPanel state={state} titleOf={titleOf} onHighlight={setMustPassHL} />}
 
+      {state && <TimeWindowPanel state={state} titleOf={titleOf} onHighlight={setTimeWindowHL} />}
+
       {orderPreview && (
         <div className="preview-banner">
           <span>
@@ -358,6 +363,7 @@ export default function App() {
               orderPath={orderPath}
               preview={orderPreview}
               mustPass={mustPassHL}
+              timeWindow={timeWindowHL}
               onStartLink={setLinkFrom}
               onCancelLink={() => setLinkFrom(null)}
               onConnect={connect}

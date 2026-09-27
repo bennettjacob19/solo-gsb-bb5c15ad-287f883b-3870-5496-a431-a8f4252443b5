@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   analyzeMustPass,
+  analyzeTimeWindow,
   cycleAfterAdding,
   findBypassPath,
   findCycle,
@@ -542,4 +543,194 @@ test('事务模拟：任意可合并场景执行计划后无重复连线、无�
     keys.sort(),
     ['a->t', 'b->t', 't->c', 't->d', 'x->y'],
   );
+});
+
+/* ---------- 时间窗口分析（沿 DAG 双向传播上下界） ---------- */
+
+const T = (h: number, m = 0) => Date.UTC(2026, 2, 12, h, m); // 2026-03-12 hh:mm（UTC 墙钟轴）
+const GAP = 60 * 60_000; // 1 小时间隔（毫秒）
+
+const fixedMap = (rec: Record<string, number | null>): Map<string, number | null> => new Map(Object.entries(rec));
+
+test('analyzeTimeWindow：孤立卡仅受事故闭区间限制（最早=起点、最晚=终点）', () => {
+  const r = analyzeTimeWindow(nodesOf(['x']), [], fixedMap({ x: null }), T(2), T(5), GAP)!;
+  assert.equal(r.feasible, true);
+  assert.deepEqual(r.cards.map((c) => [c.cardId, c.earliestMs, c.latestMs, c.fixed]), [['x', T(2), T(5), false]]);
+});
+
+test('analyzeTimeWindow：固定卡可行时最早与最晚为同一时刻', () => {
+  const r = analyzeTimeWindow(nodesOf(['x']), [], fixedMap({ x: T(3) }), T(2), T(5), GAP)!;
+  assert.equal(r.feasible, true);
+  assert.equal(r.cards[0].earliestMs, T(3));
+  assert.equal(r.cards[0].latestMs, T(3));
+  assert.equal(r.cards[0].fixed, true);
+});
+
+test('analyzeTimeWindow：固定时刻早于区间起点 → 越界（before-start），不做传播', () => {
+  const r = analyzeTimeWindow(nodesOf(['x']), [], fixedMap({ x: T(1) }), T(2), T(5), GAP)!;
+  assert.equal(r.feasible, false);
+  assert.deepEqual(r.outOfRange, [{ cardId: 'x', fixedAtMs: T(1), side: 'before-start' }]);
+  assert.equal(r.conflict, null);
+  assert.deepEqual(r.cards, []);
+});
+
+test('analyzeTimeWindow：固定时刻晚于区间终点 → 越界（after-end）', () => {
+  const r = analyzeTimeWindow(nodesOf(['x']), [], fixedMap({ x: T(6) }), T(2), T(5), GAP)!;
+  assert.equal(r.feasible, false);
+  assert.deepEqual(r.outOfRange, [{ cardId: 'x', fixedAtMs: T(6), side: 'after-end' }]);
+});
+
+test('analyzeTimeWindow：固定时刻恰为区间端点合法（闭区间）', () => {
+  const r1 = analyzeTimeWindow(nodesOf(['x']), [], fixedMap({ x: T(2) }), T(2), T(5), GAP)!;
+  const r2 = analyzeTimeWindow(nodesOf(['x']), [], fixedMap({ x: T(5) }), T(2), T(5), GAP)!;
+  assert.equal(r1.feasible, true);
+  assert.equal(r2.feasible, true);
+});
+
+test('analyzeTimeWindow：链式 a→b→c 正向最早时刻逐级加间隔、反向最晚逐级减间隔', () => {
+  const nodes = nodesOf(['a', 'b', 'c']);
+  const edges = [
+    { fromId: 'a', toId: 'b' },
+    { fromId: 'b', toId: 'c' },
+  ];
+  const r = analyzeTimeWindow(nodes, edges, fixedMap({ a: null, b: null, c: null }), T(2), T(6), GAP)!;
+  assert.equal(r.feasible, true);
+  const m = new Map(r.cards.map((c) => [c.cardId, c]));
+  assert.deepEqual([m.get('a')!.earliestMs, m.get('a')!.latestMs], [T(2), T(4)]);
+  assert.deepEqual([m.get('b')!.earliestMs, m.get('b')!.latestMs], [T(3), T(5)]);
+  assert.deepEqual([m.get('c')!.earliestMs, c_latest(m, 'c')], [T(4), T(6)]);
+});
+
+function c_latest(m: Map<string, { earliestMs: number; latestMs: number }>, id: string): number {
+  return m.get(id)!.latestMs;
+}
+
+test('analyzeTimeWindow：空时间卡参与推导（前驱固定时刻把空卡的下界推后）', () => {
+  const nodes = nodesOf(['a', 'b']);
+  const edges = [{ fromId: 'a', toId: 'b' }];
+  const r = analyzeTimeWindow(nodes, edges, fixedMap({ a: T(3), b: null }), T(2), T(6), GAP)!;
+  assert.equal(r.feasible, true);
+  const m = new Map(r.cards.map((c) => [c.cardId, c]));
+  assert.deepEqual([m.get('a')!.earliestMs, m.get('a')!.latestMs], [T(3), T(3)]);
+  assert.deepEqual([m.get('b')!.earliestMs, m.get('b')!.latestMs], [T(4), T(6)]);
+});
+
+test('analyzeTimeWindow：后继固定时刻把空卡的上界提前', () => {
+  const nodes = nodesOf(['a', 'b']);
+  const edges = [{ fromId: 'a', toId: 'b' }];
+  const r = analyzeTimeWindow(nodes, edges, fixedMap({ a: null, b: T(4) }), T(2), T(6), GAP)!;
+  assert.equal(r.feasible, true);
+  const m = new Map(r.cards.map((c) => [c.cardId, c]));
+  assert.deepEqual([m.get('a')!.earliestMs, m.get('a')!.latestMs], [T(2), T(3)]);
+  assert.deepEqual([m.get('b')!.earliestMs, m.get('b')!.latestMs], [T(4), T(4)]);
+});
+
+test('analyzeTimeWindow：两张固定卡间隔不足 → 上下界冲突，路径为真实约束边', () => {
+  const nodes = nodesOf(['a', 'b']);
+  const edges = [{ fromId: 'a', toId: 'b' }];
+  const r = analyzeTimeWindow(nodes, edges, fixedMap({ a: T(3), b: T(3) }), T(2), T(6), GAP)!;
+  assert.equal(r.feasible, false);
+  assert.deepEqual(r.outOfRange, []);
+  assert.ok(r.conflict);
+  // 冲突点为首张上下界矛盾的卡片 a：固定 03:00（下界），但要给 b 留出 1 小时间隔只能 ≤ 02:00（上界）
+  assert.equal(r.conflict!.pivotId, 'a');
+  assert.equal(r.conflict!.lowerAtMs, T(3));
+  assert.equal(r.conflict!.upperAtMs, T(2));
+  assert.deepEqual(r.conflict!.path, ['a', 'b']);
+  assert.equal(r.conflict!.lowerAnchor, 'fixed');
+  assert.equal(r.conflict!.lowerAnchorCardId, 'a');
+  assert.equal(r.conflict!.upperAnchor, 'fixed');
+  assert.equal(r.conflict!.upperAnchorCardId, 'b');
+});
+
+test('analyzeTimeWindow：区间过短容不下链长 → 区间起点/终点经路径冲突', () => {
+  // a→b→c 共需 2 个间隔；区间 [02:00, 03:00] 仅 60 分钟，容不下
+  const nodes = nodesOf(['a', 'b', 'c']);
+  const edges = [
+    { fromId: 'a', toId: 'b' },
+    { fromId: 'b', toId: 'c' },
+  ];
+  const r = analyzeTimeWindow(nodes, edges, fixedMap({ a: null, b: null, c: null }), T(2), T(3), GAP)!;
+  assert.equal(r.feasible, false);
+  assert.ok(r.conflict);
+  // 冲突点为链首 a：区间起点要求 ≥ 02:00，但要在 03:00 前留出 2 个间隔只能 ≤ 01:00
+  assert.equal(r.conflict!.pivotId, 'a');
+  assert.equal(r.conflict!.lowerAtMs, T(2));
+  assert.equal(r.conflict!.upperAtMs, T(1));
+  assert.deepEqual(r.conflict!.path, ['a', 'b', 'c']);
+  assert.equal(r.conflict!.lowerAnchor, 'window-start');
+  assert.equal(r.conflict!.upperAnchor, 'window-end');
+  assert.equal(r.conflict!.lowerAnchorCardId, null);
+  assert.equal(r.conflict!.upperAnchorCardId, null);
+});
+
+test('analyzeTimeWindow：固定锚点与区间锚点经真实路径冲突（菱形取最长上界链）', () => {
+  // 菱形 a→b→d、a→c→d：a 固定 03:00，d 的下界取最长路径 03:00+2×gap=05:00；
+  // 区间终点 04:30 使 a 的上界经最长链被压到 02:30，与固定时刻冲突
+  const nodes = nodesOf(['a', 'b', 'c', 'd']);
+  const edges = [
+    { fromId: 'a', toId: 'b' },
+    { fromId: 'a', toId: 'c' },
+    { fromId: 'b', toId: 'd' },
+    { fromId: 'c', toId: 'd' },
+  ];
+  const r = analyzeTimeWindow(
+    nodes,
+    edges,
+    fixedMap({ a: T(3), b: null, c: null, d: null }),
+    T(2),
+    T(4, 30),
+    GAP,
+  )!;
+  assert.equal(r.feasible, false);
+  assert.ok(r.conflict);
+  assert.equal(r.conflict!.pivotId, 'a');
+  assert.equal(r.conflict!.lowerAtMs, T(3));
+  assert.equal(r.conflict!.upperAtMs, T(2, 30));
+  // 路径相邻节点必须都是图中真实边
+  const p = r.conflict!.path;
+  const edgeSet = new Set(edges.map((e) => `${e.fromId}->${e.toId}`));
+  for (let i = 0; i < p.length - 1; i++) assert.ok(edgeSet.has(`${p[i]}->${p[i + 1]}`), `路径段 ${p[i]}→${p[i + 1]} 应为真实约束`);
+  assert.deepEqual(p, ['a', 'b', 'd']); // b < c，取稳定的最长链
+  assert.equal(r.conflict!.lowerAnchor, 'fixed');
+  assert.equal(r.conflict!.lowerAnchorCardId, 'a');
+  assert.equal(r.conflict!.upperAnchor, 'window-end');
+  assert.equal(r.conflict!.upperAnchorCardId, null);
+});
+
+test('analyzeTimeWindow：无向关联的组件互不影响，各自可行', () => {
+  const nodes = nodesOf(['a', 'b', 'x', 'y']);
+  const edges = [
+    { fromId: 'a', toId: 'b' },
+    { fromId: 'x', toId: 'y' },
+  ];
+  const r = analyzeTimeWindow(
+    nodes,
+    edges,
+    fixedMap({ a: T(2), b: T(3), x: T(4), y: T(5) }),
+    T(2),
+    T(5),
+    GAP,
+  )!;
+  assert.equal(r.feasible, true);
+});
+
+test('analyzeTimeWindow：多张越界固定卡全部列出（按拓扑序）', () => {
+  const nodes = nodesOf(['a', 'b']);
+  const edges = [{ fromId: 'a', toId: 'b' }];
+  const r = analyzeTimeWindow(nodes, edges, fixedMap({ a: T(1), b: T(8) }), T(2), T(6), GAP)!;
+  assert.equal(r.feasible, false);
+  assert.deepEqual(r.outOfRange, [
+    { cardId: 'a', fixedAtMs: T(1), side: 'before-start' },
+    { cardId: 'b', fixedAtMs: T(8), side: 'after-end' },
+  ]);
+});
+
+test('analyzeTimeWindow：有环图返回 null', () => {
+  const nodes = nodesOf(['a', 'b']);
+  const edges = [
+    { fromId: 'a', toId: 'b' },
+    { fromId: 'b', toId: 'a' },
+  ];
+  assert.equal(analyzeTimeWindow(nodes, edges, fixedMap({ a: null, b: null }), T(2), T(5), GAP), null);
 });

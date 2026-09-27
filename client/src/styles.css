@@ -940,6 +940,198 @@ body {
   line-height: 1.7;
 }
 
+/* ---------- 时间窗口分析面板 ---------- */
+
+.tw-panel {
+  background: var(--bg-soft);
+  border: 1px solid rgba(250, 204, 21, 0.4);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 14px;
+}
+
+.tw-head h2 {
+  margin: 0 0 4px;
+  font-size: 15.5px;
+  color: #facc15;
+}
+
+.tw-head p {
+  margin: 0 0 10px;
+  max-width: 960px;
+  line-height: 1.6;
+}
+
+.tw-controls {
+  align-items: flex-end;
+}
+
+.tw-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tw-field input {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13.5px;
+  font-family: inherit;
+  color-scheme: dark;
+}
+
+.tw-field input:focus {
+  outline: none;
+  border-color: #facc15;
+}
+
+.tw-gap input {
+  width: 130px;
+}
+
+.tw-result {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tw-summary {
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.tw-summary b {
+  color: #facc15;
+}
+
+.tw-verdict {
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.tw-verdict.ok {
+  color: var(--ok);
+}
+
+.tw-verdict.bad {
+  color: var(--danger);
+}
+
+.tw-verdict b {
+  color: var(--danger);
+}
+
+.tw-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.tw-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 560px;
+}
+
+.tw-table th,
+.tw-table td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.tw-table th {
+  color: var(--muted);
+  font-weight: 600;
+  background: rgba(250, 204, 21, 0.06);
+}
+
+.tw-table tbody tr:hover {
+  background: rgba(250, 204, 21, 0.05);
+}
+
+.tw-table tr.tw-fixed {
+  background: rgba(139, 147, 255, 0.07);
+}
+
+.tw-table tr.tw-fixed .tw-card-name {
+  color: var(--accent);
+}
+
+.tw-card-name {
+  font-weight: 600;
+}
+
+.tw-out-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.tw-out-list li::marker {
+  color: var(--danger);
+}
+
+.tw-out-list .btn {
+  margin-left: 10px;
+}
+
+.tw-conflict-explain {
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.tw-path {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--danger);
+  background: rgba(255, 92, 108, 0.08);
+  border: 1px dashed rgba(255, 92, 108, 0.5);
+  border-radius: 8px;
+  padding: 8px 12px;
+  line-height: 1.8;
+}
+
+/* 时间窗口冲突路径上的连线（红色加粗） */
+.edge.tw-conflict .edge-line {
+  stroke: var(--danger);
+  stroke-width: 3.5;
+  opacity: 1;
+}
+
+/* 时间窗口冲突路径途经卡片（红色描边） */
+.card.tw-path {
+  border-color: rgba(255, 92, 108, 0.75);
+  box-shadow: 0 0 0 3px rgba(255, 92, 108, 0.14);
+}
+
+/* 上下界冲突的卡片（强脉动，优先级高于普通路径） */
+.card.tw-pivot {
+  border-color: var(--danger);
+  animation: card-shake-glow 1.4s ease-in-out infinite;
+}
+
+/* 固定时刻越出事故区间、待定位的卡片（红色脉动） */
+.card.tw-outrange {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(255, 92, 108, 0.3);
+  animation: card-shake-glow 1.2s ease-in-out infinite;
+}
+
 /* ---------- 弹窗 ---------- */
 
 .modal-backdrop {

@@ -428,3 +428,177 @@ export function findCycle(ids: string[], edges: EdgeLike[]): string[] | null {
   }
   return null;
 }
+
+/* ---------- 时间窗口分析（沿 DAG 双向传播时间上下界） ---------- */
+
+export interface TimeWindowNode {
+  id: string;
+  /** 已有发生时间（固定时刻）；null 表示空时间卡，赋时待定 */
+  fixedAtMs: number | null;
+}
+
+export interface TimeWindowConflict {
+  pivotId: string;
+  lowerAtMs: number;
+  upperAtMs: number;
+  path: string[];
+  lowerAnchor: 'window-start' | 'fixed';
+  upperAnchor: 'window-end' | 'fixed';
+  lowerAnchorCardId: string | null;
+  upperAnchorCardId: string | null;
+}
+
+export interface TimeWindowAnalysis {
+  feasible: boolean;
+  /** 确定性拓扑序（按创建时间、再按 id 稳定排序），结果按此顺序输出 */
+  order: string[];
+  cards: Array<{ cardId: string; fixed: boolean; earliestMs: number; latestMs: number }>;
+  outOfRange: Array<{ cardId: string; fixedAtMs: number; side: 'before-start' | 'after-end' }>;
+  conflict: TimeWindowConflict | null;
+}
+
+interface LowerWitness {
+  anchor: 'window-start' | 'fixed';
+  anchorCardId: string | null;
+  /** 下界传播链：锚点（起点）→ … → 当前卡片，相邻节点为真实边 */
+  chain: string[];
+}
+
+interface UpperWitness {
+  anchor: 'window-end' | 'fixed';
+  anchorCardId: string | null;
+  /** 上界传播链：当前卡片 → … → 锚点（终点），相邻节点为真实边 */
+  chain: string[];
+}
+
+/**
+ * 时间窗口分析（纯只读）：
+ *
+ * 在事故闭区间 [windowStartMs, windowEndMs] 内，沿现有「必须早于」DAG
+ * 对每条边施加约束 `t(to) >= t(from) + gapMs`（后卡至少晚于前卡 gapMs），
+ * 固定时刻卡片取定值。先正向（拓扑序）传播下界（最早时刻）、
+ * 再反向传播上界（最晚时刻）；当某张卡片的下界 > 上界时无解，
+ * 取首个冲突卡片，用其上下界见证链拼出一条导致冲突的真实约束路径。
+ *
+ * 空时间卡参与推导；孤立卡仅受事故闭区间限制（最早=区间起点、最晚=区间终点）。
+ * 固定时刻越出闭区间的卡片优先报出（定位该卡），存在越界卡时不做上下界传播。
+ * 图有环时返回 null（现有图本就保证无环）。
+ */
+export function analyzeTimeWindow(
+  nodes: OrderableNode[],
+  edges: EdgeLike[],
+  fixedAt: Map<string, number | null>,
+  windowStartMs: number,
+  windowEndMs: number,
+  gapMs: number,
+): TimeWindowAnalysis | null {
+  const order = stableTopoOrder(nodes, edges);
+  if (!order) return null;
+
+  const adj = new Map<string, string[]>();
+  const radj = new Map<string, string[]>();
+  for (const id of order) {
+    adj.set(id, []);
+    radj.set(id, []);
+  }
+  for (const e of edges) {
+    if (!adj.has(e.fromId) || !adj.has(e.toId)) continue;
+    adj.get(e.fromId)!.push(e.toId);
+    radj.get(e.toId)!.push(e.fromId);
+  }
+  // 邻接按 id 排序，保证多前驱取同一最大值时结果确定
+  for (const list of adj.values()) list.sort();
+  for (const list of radj.values()) list.sort();
+
+  const fixedOf = (id: string): number | null => fixedAt.get(id) ?? null;
+
+  /* 固定时刻越出事故闭区间优先报出：存在时定位该卡片，不再传播上下界 */
+  const outOfRange: TimeWindowAnalysis['outOfRange'] = [];
+  for (const id of order) {
+    const f = fixedOf(id);
+    if (f === null) continue;
+    if (f < windowStartMs) outOfRange.push({ cardId: id, fixedAtMs: f, side: 'before-start' });
+    else if (f > windowEndMs) outOfRange.push({ cardId: id, fixedAtMs: f, side: 'after-end' });
+  }
+  if (outOfRange.length > 0) {
+    return { feasible: false, order, cards: [], outOfRange, conflict: null };
+  }
+
+  /* 正向传播下界：lb(v) = max(区间起点, 固定值, 前驱 lb + gap) */
+  const lb = new Map<string, number>();
+  const lw = new Map<string, LowerWitness>();
+  for (const id of order) {
+    let value = windowStartMs;
+    let witness: LowerWitness = { anchor: 'window-start', anchorCardId: null, chain: [id] };
+    const f = fixedOf(id);
+    if (f !== null) {
+      value = f;
+      witness = { anchor: 'fixed', anchorCardId: id, chain: [id] };
+    }
+    for (const p of radj.get(id)!) {
+      const candidate = lb.get(p)! + gapMs;
+      if (candidate > value) {
+        value = candidate;
+        const pw = lw.get(p)!;
+        witness = { anchor: pw.anchor, anchorCardId: pw.anchorCardId, chain: [...pw.chain, id] };
+      }
+    }
+    lb.set(id, value);
+    lw.set(id, witness);
+  }
+
+  /* 反向传播上界：ub(v) = min(区间终点, 固定值, 后继 ub - gap) */
+  const ub = new Map<string, number>();
+  const uw = new Map<string, UpperWitness>();
+  for (let i = order.length - 1; i >= 0; i--) {
+    const id = order[i];
+    let value = windowEndMs;
+    let witness: UpperWitness = { anchor: 'window-end', anchorCardId: null, chain: [id] };
+    const f = fixedOf(id);
+    if (f !== null) {
+      value = f;
+      witness = { anchor: 'fixed', anchorCardId: id, chain: [id] };
+    }
+    for (const s of adj.get(id)!) {
+      const candidate = ub.get(s)! - gapMs;
+      if (candidate < value) {
+        value = candidate;
+        const sw = uw.get(s)!;
+        witness = { anchor: sw.anchor, anchorCardId: sw.anchorCardId, chain: [id, ...sw.chain] };
+      }
+    }
+    ub.set(id, value);
+    uw.set(id, witness);
+  }
+
+  /* 首个下界 > 上界的卡片即冲突点；其两条见证链拼成一条真实约束路径 */
+  for (const id of order) {
+    if (lb.get(id)! <= ub.get(id)!) continue;
+    const lower = lw.get(id)!;
+    const upper = uw.get(id)!;
+    // 下界链：锚点 → … → id；上界链：id → … → 锚点（去掉重复的 id 后拼接）
+    const path = [...lower.chain, ...upper.chain.slice(1)];
+    return {
+      feasible: false,
+      order,
+      cards: [],
+      outOfRange: [],
+      conflict: {
+        pivotId: id,
+        lowerAtMs: lb.get(id)!,
+        upperAtMs: ub.get(id)!,
+        path,
+        lowerAnchor: lower.anchor,
+        upperAnchor: upper.anchor,
+        lowerAnchorCardId: lower.anchorCardId,
+        upperAnchorCardId: upper.anchorCardId,
+      },
+    };
+  }
+
+  const cards = order.map((id) => {
+    const f = fixedOf(id);
+    return { cardId: id, fixed: f !== null, earliestMs: lb.get(id)!, latestMs: ub.get(id)! };
+  });
+  return { feasible: true, order, cards, outOfRange: [], conflict: null };
+}

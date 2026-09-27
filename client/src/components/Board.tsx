@@ -1,6 +1,6 @@
-import { useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import type { Conflict } from '../App';
-import type { Evidence, GraphState, MustPassHighlight, OrderWitness, RedundantEdge } from '../types';
+import type { Evidence, GraphState, MustPassHighlight, OrderWitness, RedundantEdge, TimeWindowHighlight } from '../types';
 
 interface Rect {
   x: number;
@@ -23,6 +23,8 @@ interface BoardProps {
   preview: OrderWitness | null;
   /** 必经证据分析：高亮起终点与必经中间卡片，以及绕开核对路径 */
   mustPass: MustPassHighlight | null;
+  /** 时间窗口分析：冲突路径 / 待定位的越界卡片（红色系） */
+  timeWindow: TimeWindowHighlight | null;
   onStartLink: (id: string) => void;
   onCancelLink: () => void;
   onConnect: (fromId: string, toId: string) => void;
@@ -155,6 +157,29 @@ export default function Board(props: BoardProps) {
   }, [bypassPath]);
   const mustSkipId = props.mustPass?.bypass?.skipId ?? null;
 
+  /* 时间窗口冲突高亮：冲突路径上的边与节点（红色），冲突卡片脉动；越界固定卡定位 */
+  const twEdgeKeys = useMemo(() => {
+    const s = new Set<string>();
+    const p = props.timeWindow?.path;
+    if (p) {
+      for (let i = 0; i < p.length - 1; i++) s.add(`${p[i]}->${p[i + 1]}`);
+    }
+    return s;
+  }, [props.timeWindow]);
+  const twPathNodes = useMemo(() => new Set(props.timeWindow?.path ?? []), [props.timeWindow]);
+  const twPivotId = props.timeWindow?.pivotId ?? null;
+  const twOutOfRange = useMemo(() => new Set(props.timeWindow?.outOfRange ?? []), [props.timeWindow]);
+
+  /* 越界固定卡首次出现时滚动到可视区域（定位） */
+  useEffect(() => {
+    const ids = props.timeWindow?.outOfRange;
+    if (!ids || ids.length === 0) return;
+    const el = boardRef.current?.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(ids[0])}"]`);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    // 仅在定位目标变化时触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.timeWindow]);
+
   /* 测量卡片位置，用于绘制 SVG 连线 */
   useLayoutEffect(() => {
     const board = boardRef.current;
@@ -264,6 +289,9 @@ export default function Board(props: BoardProps) {
           <marker id="arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 1 L 9 5 L 0 9 z" fill="#fb923c" />
           </marker>
+          <marker id="arrow-red2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#ff5c6c" />
+          </marker>
         </defs>
 
         {state.edges.map((e) => {
@@ -276,6 +304,7 @@ export default function Board(props: BoardProps) {
           const isPruneAlt = pruneAltEdgeKeys.has(key);
           const isOrderPath = orderPathEdgeKeys.has(key);
           const isBypass = bypassEdgeKeys.has(key);
+          const isTwConflict = twEdgeKeys.has(key);
           const cls = [
             'edge',
             isConflict ? 'conflict' : '',
@@ -283,6 +312,7 @@ export default function Board(props: BoardProps) {
             isPruneAlt ? 'prune-alt' : '',
             isOrderPath ? 'order-path' : '',
             isBypass ? 'bypass' : '',
+            isTwConflict ? 'tw-conflict' : '',
           ]
             .filter(Boolean)
             .join(' ');
@@ -296,7 +326,9 @@ export default function Board(props: BoardProps) {
                   ? 'arrow-cyan'
                   : isBypass
                     ? 'arrow-orange'
-                    : 'arrow';
+                    : isTwConflict
+                      ? 'arrow-red2'
+                      : 'arrow';
           const d = curve(s, t);
           return (
             <g key={e.id} className={cls} onClick={() => props.onDeleteEdge(e.id)}>
@@ -355,6 +387,9 @@ export default function Board(props: BoardProps) {
               const isMustPass = mustPassNodes.has(ev.id);
               const isBypassNode = bypassNodes.has(ev.id);
               const isMustSkip = mustSkipId === ev.id;
+              const isTwPath = twPathNodes.has(ev.id);
+              const isTwPivot = twPivotId === ev.id;
+              const isTwOutOfRange = twOutOfRange.has(ev.id);
               return (
                 <article
                   key={ev.id}
@@ -373,6 +408,9 @@ export default function Board(props: BoardProps) {
                     isMustPass ? 'must-pass' : '',
                     isBypassNode ? 'bypass-node' : '',
                     isMustSkip ? 'must-skip' : '',
+                    isTwPath ? 'tw-path' : '',
+                    isTwPivot ? 'tw-pivot' : '',
+                    isTwOutOfRange ? 'tw-outrange' : '',
                   ]
                     .filter(Boolean)
                     .join(' ')}

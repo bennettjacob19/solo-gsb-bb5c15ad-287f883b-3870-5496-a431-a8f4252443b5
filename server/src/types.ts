@@ -100,3 +100,62 @@ export interface BypassPathResult {
   /** 绕开 skipId 的一条最短 A→B 真实路径（含两端点）；不存在（该卡片实为必经）时为 null */
   path: string[] | null;
 }
+
+/* ---------- 时间窗口分析（只读） ---------- */
+
+/** 单张卡片在事故闭区间内的可行赋时窗口（最早 / 最晚时刻） */
+export interface TimeWindowCard {
+  cardId: string;
+  /** 是否为已有发生时间的固定时刻卡片（固定时 earliest === latest） */
+  fixed: boolean;
+  earliestMs: number;
+  latestMs: number;
+  /** 墙钟分钟精度字符串（YYYY-MM-DDTHH:mm），与录入/展示口径一致、不受时区影响 */
+  earliest: string;
+  latest: string;
+}
+
+/** 固定时刻越出事故闭区间的卡片（定位用） */
+export interface TimeWindowOutOfRange {
+  cardId: string;
+  fixedAtMs: number;
+  fixedAt: string;
+  side: 'before-start' | 'after-end';
+}
+
+/** 上下界冲突：一条真实约束路径在某张卡片上推得「最早时刻 > 最晚时刻」 */
+export interface TimeWindowBoundConflict {
+  kind: 'bound-conflict';
+  /** 上下界发生冲突的卡片 */
+  pivotId: string;
+  lowerAtMs: number;
+  upperAtMs: number;
+  /** 冲突时间：下界要求的最早时刻 / 上界允许的最晚时刻（分钟精度字符串） */
+  lowerAt: string;
+  upperAt: string;
+  /**
+   * 导致冲突的真实约束路径（卡片 id 序列，相邻卡片即图中已有连线）：
+   * 前半段沿「必须早于」连线把下界从下界锚点传播到 pivot，
+   * 后半段沿反向连线把上界从上界锚点传播回 pivot。
+   */
+  path: string[];
+  lowerAnchor: 'window-start' | 'fixed';
+  upperAnchor: 'window-end' | 'fixed';
+  /** 锚点为固定时刻时对应的固定卡片 id（锚点可能就是 pivot 自身） */
+  lowerAnchorCardId: string | null;
+  upperAnchorCardId: string | null;
+}
+
+/** 时间窗口分析结果（只读，不改写卡片或连线） */
+export interface TimeWindowResult {
+  feasible: boolean;
+  windowStart: string;
+  windowEnd: string;
+  gapMinutes: number;
+  /** feasible=true 时：每张卡片的最早 / 最晚可行时刻（按确定性拓扑序排列） */
+  cards: TimeWindowCard[];
+  /** 固定时刻越出事故闭区间的卡片（存在时不做传播、不展示可行窗口） */
+  outOfRange: TimeWindowOutOfRange[];
+  /** feasible=false 且无越界固定卡时：导致上下界冲突的真实约束路径 */
+  conflict: TimeWindowBoundConflict | null;
+}

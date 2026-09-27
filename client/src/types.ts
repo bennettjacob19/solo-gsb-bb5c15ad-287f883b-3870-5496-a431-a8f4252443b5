@@ -113,3 +113,62 @@ export interface MustPassHighlight {
   /** 正在核对的绕开路径（含两端点）与被绕开的卡片 */
   bypass: { skipId: string; path: string[] } | null;
 }
+
+/* ---------- 时间窗口分析（只读） ---------- */
+
+/** 单张卡片在事故闭区间内的可行赋时窗口（最早 / 最晚时刻） */
+export interface TimeWindowCard {
+  cardId: string;
+  /** 是否为已有发生时间的固定时刻卡片（固定时 earliest === latest） */
+  fixed: boolean;
+  earliestMs: number;
+  latestMs: number;
+  /** 分钟精度字符串（YYYY-MM-DDTHH:mm） */
+  earliest: string;
+  latest: string;
+}
+
+/** 固定时刻越出事故闭区间的卡片（定位用） */
+export interface TimeWindowOutOfRange {
+  cardId: string;
+  fixedAtMs: number;
+  fixedAt: string;
+  side: 'before-start' | 'after-end';
+}
+
+/** 上下界冲突：一条真实约束路径在某张卡片上推得「最早时刻 > 最晚时刻」 */
+export interface TimeWindowBoundConflict {
+  kind: 'bound-conflict';
+  pivotId: string;
+  lowerAtMs: number;
+  upperAtMs: number;
+  lowerAt: string;
+  upperAt: string;
+  /** 导致冲突的真实约束路径（相邻节点即图中已有连线） */
+  path: string[];
+  lowerAnchor: 'window-start' | 'fixed';
+  upperAnchor: 'window-end' | 'fixed';
+  lowerAnchorCardId: string | null;
+  upperAnchorCardId: string | null;
+}
+
+/** 时间窗口分析结果（只读） */
+export interface TimeWindowResult {
+  feasible: boolean;
+  windowStart: string;
+  windowEnd: string;
+  gapMinutes: number;
+  cards: TimeWindowCard[];
+  outOfRange: TimeWindowOutOfRange[];
+  conflict: TimeWindowBoundConflict | null;
+}
+
+/** 时间窗口分析在画布上的高亮视图 */
+export interface TimeWindowHighlight {
+  /** 上下界冲突路径（红色）或待定位的越界固定卡 */
+  path: string[];
+  /** 冲突卡片（上下界矛盾处） */
+  pivotId: string | null;
+  /** 需要定位的越界固定卡 id 列表 */
+  outOfRange: string[];
+}
